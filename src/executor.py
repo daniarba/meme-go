@@ -30,11 +30,21 @@ async def get_quote(session, input_mint: str, output_mint: str, amount: int, sli
         "amount": amount,
         "slippageBps": slippage_bps,
     }
-    async with session.get(Config.JUPITER_QUOTE_URL, params=params, timeout=10) as resp:
-        if resp.status != 200:
-            logger.warning(f"Jupiter quote failed: {resp.status} {await resp.text()}")
-            return None
-        return await resp.json()
+    # BUG FIX: pehle yahan try/except nahi tha - agar Jupiter se connection error
+    # aaye (timeout, DNS, network blip), poora background task crash ho jata tha
+    # (uncaught exception), aur token "Bought" ya "failed" alert kuch nahi milta tha,
+    # bas silently rah jata tha. Ab connection errors bhi gracefully handle hote hain.
+    for attempt in range(2):
+        try:
+            async with session.get(Config.JUPITER_QUOTE_URL, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Jupiter quote failed: {resp.status} {await resp.text()}")
+                    return None
+                return await resp.json()
+        except Exception as e:
+            logger.warning(f"Jupiter quote connection error (attempt {attempt + 1}/2): {e}")
+    logger.error(f"Jupiter quote failed after retries for {input_mint} -> {output_mint}")
+    return None
 
 
 async def _build_swap_transaction(session, quote: dict, wallet_pubkey: str):
@@ -44,11 +54,17 @@ async def _build_swap_transaction(session, quote: dict, wallet_pubkey: str):
         "wrapAndUnwrapSol": True,
         "prioritizationFeeLamports": Config.PRIORITY_FEE_LAMPORTS,
     }
-    async with session.post(Config.JUPITER_SWAP_URL, json=payload, timeout=10) as resp:
-        if resp.status != 200:
-            logger.warning(f"Jupiter swap build failed: {resp.status} {await resp.text()}")
-            return None
-        return await resp.json()
+    for attempt in range(2):
+        try:
+            async with session.post(Config.JUPITER_SWAP_URL, json=payload, timeout=10) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Jupiter swap build failed: {resp.status} {await resp.text()}")
+                    return None
+                return await resp.json()
+        except Exception as e:
+            logger.warning(f"Jupiter swap-build connection error (attempt {attempt + 1}/2): {e}")
+    logger.error("Jupiter swap build failed after retries")
+    return None
 
 
 async def execute_swap(input_mint: str, output_mint: str, amount_lamports: int,
